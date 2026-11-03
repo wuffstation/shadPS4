@@ -1,8 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <bit>
+#include <cstdio>
 #include <map>
 #include <span>
+#include <vector>
 #include <vector>
 #include <fmt/format.h>
 #include "common/alignment.h"
@@ -684,6 +688,13 @@ struct AddressSpace::Impl {
         map_flags |= MAP_NORESERVE;
 #endif
 
+#if defined(__linux__) && defined(ARCH_X86_64)
+        if (ReserveNarrowHost(protection_flags, map_flags)) {
+            CreateBacking();
+            return;
+        }
+#endif
+
 #if defined(__APPLE__) && defined(ARCH_X86_64)
         // On ARM64 Macs, we run into limitations due to the commpage from 0xFC0000000 - 0xFFFFFFFFF
         // and the GPU carveout region from 0x1000000000 - 0x6FFFFFFFFF. Because this creates gaps
@@ -732,6 +743,103 @@ struct AddressSpace::Impl {
         LOG_INFO(Kernel_Vmm, "User virtual memory region: {} - {}", fmt::ptr(user_base),
                  fmt::ptr(user_base + user_size - 1));
 
+#if !defined(__APPLE__) && !defined(__FreeBSD__)
+        madvise(virtual_base, virtual_size, MADV_HUGEPAGE);
+#endif
+        CreateBacking();
+    }
+
+#if defined(__linux__) && defined(ARCH_X86_64)
+    // Linux on an arm64 kernel with 39-bit virtual addresses gives a process 512 GiB, which is how
+    // this build runs on Android under FEXCore. The full range would take the host's own mappings
+    // with it, so a host narrower than the user area gets the free gaps below its top quarter.
+    static std::vector<std::pair<VAddr, VAddr>> ReadHostMappings() {
+        std::vector<std::pair<VAddr, VAddr>> mappings;
+        FILE* maps = fopen("/proc/self/maps", "r");
+        if (!maps) {
+            return mappings;
+        }
+        char line[512];
+        while (fgets(line, sizeof(line), maps)) {
+            unsigned long long start = 0, end = 0;
+            if (sscanf(line, "%llx-%llx", &start, &end) == 2 && start < 0x800000000000ULL) {
+                mappings.emplace_back(start, end);
+            }
+        }
+        fclose(maps);
+        std::ranges::sort(mappings);
+        return mappings;
+    }
+
+    bool ReserveNarrowHost(int protection_flags, int map_flags) {
+        const auto mappings = ReadHostMappings();
+        if (mappings.empty()) {
+            return false;
+        }
+        const VAddr ceiling = std::bit_ceil(mappings.back().second);
+        if (ceiling > USER_MAX) {
+            return false;
+        }
+        const VAddr window_end = ceiling - std::max<VAddr>(ceiling / 4, 128_GB);
+        ASSERT_MSG(window_end > USER_MIN, "Host address space ending at {:#x} is too small",
+                   ceiling);
+        LOG_INFO(Kernel_Vmm, "Host address space ends at {:#x}, using {:#x} - {:#x}", ceiling,
+                 SYSTEM_MANAGED_MIN, window_end);
+
+        map_flags = (map_flags & ~MAP_FIXED) | MAP_FIXED_NOREPLACE;
+        constexpr u64 RegionAlignment = 2_MB;
+        constexpr u64 MinRegionSize = 16_MB;
+        for (int attempt = 0; attempt < 4; attempt++) {
+            bool raced = false;
+            VAddr cursor = SYSTEM_MANAGED_MIN;
+            auto mappings_now = ReadHostMappings();
+            mappings_now.emplace_back(window_end, window_end);
+            for (const auto& [start, end] : mappings_now) {
+                const VAddr gap_start = Common::AlignUp(cursor, RegionAlignment);
+                const VAddr gap_end = Common::AlignDown(std::min(start, window_end), RegionAlignment);
+                cursor = std::max(cursor, end);
+                if (gap_end <= gap_start || gap_end - gap_start < MinRegionSize) {
+                    continue;
+                }
+                void* addr = reinterpret_cast<void*>(gap_start);
+                void* ret = mmap(addr, gap_end - gap_start, protection_flags, map_flags, -1, 0);
+                if (ret != addr) {
+                    if (ret != MAP_FAILED) {
+                        munmap(ret, gap_end - gap_start);
+                    }
+                    raced = true;
+                    continue;
+                }
+                madvise(ret, gap_end - gap_start, MADV_HUGEPAGE);
+                usable_regions.insert({gap_start, gap_end});
+            }
+            if (!raced) {
+                break;
+            }
+        }
+        ASSERT_MSG(!usable_regions.empty(), "Unable to reserve any address space below {:#x}",
+                   window_end);
+
+        const VAddr first = usable_regions.begin()->lower();
+        system_managed_base = reinterpret_cast<u8*>(first);
+        system_managed_size = first <= SYSTEM_MANAGED_MAX ? SYSTEM_MANAGED_MAX + 1 - first : 0;
+        system_reserved_base = reinterpret_cast<u8*>(SYSTEM_RESERVED_MIN);
+        system_reserved_size = SystemReservedSize;
+        user_base = reinterpret_cast<u8*>(USER_MIN);
+        user_size = window_end - USER_MIN;
+
+        u64 reserved = 0;
+        for (const auto& region : usable_regions) {
+            reserved += region.upper() - region.lower();
+            LOG_INFO(Kernel_Vmm, "Reserved {:#x} - {:#x}", region.lower(), region.upper());
+        }
+        LOG_INFO(Kernel_Vmm, "Reserved {} GiB in {} regions", reserved >> 30,
+                 usable_regions.iterative_size());
+        return true;
+    }
+#endif
+
+    void CreateBacking() {
 #ifdef __APPLE__
         const auto shm_path = fmt::format("/BackingDmem{}", getpid());
         backing_fd = shm_open(shm_path.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
@@ -741,9 +849,6 @@ struct AddressSpace::Impl {
         }
         shm_unlink(shm_path.c_str());
 #else
-#ifndef __FreeBSD__
-        madvise(virtual_base, virtual_size, MADV_HUGEPAGE);
-#endif
         // NOTE: If you add MFD_HUGETLB or whatever, remember that FBSD will break (libc bug)
         // so please, do not, add MFD_* whatever unless you ifdef it away (must be 0 for FBSD)
         // using sized pages as well causes incessant vm_reclaim calls in kernel, do not use on FBSD
@@ -820,6 +925,7 @@ struct AddressSpace::Impl {
     }
 
     int backing_fd;
+    boost::icl::interval_set<VAddr> usable_regions;
     u8* backing_base{};
     u8* system_managed_base{};
     u64 system_managed_size{};
@@ -894,6 +1000,10 @@ boost::icl::interval_set<VAddr> AddressSpace::GetUsableRegions() {
     // On Windows, we need to obtain the accessible intervals from the implementation's regions.
     return impl->GetUsableRegions();
 #else
+    // A narrow host's space is the gaps between its own mappings.
+    if (!impl->usable_regions.empty()) {
+        return impl->usable_regions;
+    }
     // On Linux and Mac, the memory space is fully represented by the three major regions
     boost::icl::interval_set<VAddr> reserved_regions;
     VAddr system_managed_addr = reinterpret_cast<VAddr>(system_managed_base);
