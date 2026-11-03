@@ -385,6 +385,11 @@ public:
         return memory_properties;
     }
 
+    /// Returns the maximum size of a buffer.
+    u64 GetMaxBufferSize() const {
+        return vk13_props.maxBufferSize;
+    }
+
     /// Returns true if shaders can declare the ClipDistance attribute
     bool IsShaderClipDistanceSupported() const {
         return features.shaderClipDistance;
