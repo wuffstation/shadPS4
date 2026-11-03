@@ -3,7 +3,9 @@
 
 // Based on imgui_impl_sdl3.cpp from Dear ImGui repository
 
+#include <algorithm>
 #include <imgui.h>
+#include "common/android_host.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -733,9 +735,59 @@ static void UpdateGamepadAnalog(SdlData* bd, ImGuiIO& io, ImGuiKey key, SDL_Game
     io.AddKeyAnalogEvent(key, merged_value > 0.1f, merged_value);
 }
 
+// The Android host's pad reaches the emulator through its pad bridge, not SDL.
+static void UpdateAndroidHostGamepad(ImGuiIO& io) {
+    using namespace Common::AndroidHost;
+    PadWireState pad{};
+    if (PadRead(&pad) <= 0 || !pad.connected) {
+        pad = {.left_x = 128, .left_y = 128, .right_x = 128, .right_y = 128};
+        io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
+    } else {
+        io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+    }
+    const auto button = [&](ImGuiKey key, u32 bit) { io.AddKeyEvent(key, (pad.buttons & bit) != 0); };
+    button(ImGuiKey_GamepadStart, PadWireOptions);
+    button(ImGuiKey_GamepadBack, PadWireTouchPad);
+    button(ImGuiKey_GamepadFaceRight, PadWireCircle);
+    button(ImGuiKey_GamepadFaceUp, PadWireTriangle);
+    button(ImGuiKey_GamepadFaceDown, PadWireCross);
+    button(ImGuiKey_GamepadDpadLeft, PadWireLeft);
+    button(ImGuiKey_GamepadDpadRight, PadWireRight);
+    button(ImGuiKey_GamepadDpadUp, PadWireUp);
+    button(ImGuiKey_GamepadDpadDown, PadWireDown);
+    button(ImGuiKey_GamepadL1, PadWireL1);
+    button(ImGuiKey_GamepadR1, PadWireR1);
+    button(ImGuiKey_GamepadL3, PadWireL3);
+    button(ImGuiKey_GamepadR3, PadWireR3);
+    const auto analog = [&](ImGuiKey key, float value) {
+        value = std::clamp(value, 0.0f, 1.0f);
+        io.AddKeyAnalogEvent(key, value > 0.1f, value);
+    };
+    analog(ImGuiKey_GamepadL2, pad.left_trigger / 255.0f);
+    analog(ImGuiKey_GamepadR2, pad.right_trigger / 255.0f);
+    // The same 8000 of 32767 dead zone the SDL path uses, on the bridge's 0..255 axes.
+    const auto stick = [&](ImGuiKey negative, ImGuiKey positive, u8 value) {
+        constexpr float dead_zone = 8000.0f / 32767.0f;
+        const float centred = (static_cast<float>(value) - 128.0f) / 127.0f;
+        analog(negative, (-centred - dead_zone) / (1.0f - dead_zone));
+        analog(positive, (centred - dead_zone) / (1.0f - dead_zone));
+    };
+    stick(ImGuiKey_GamepadLStickLeft, ImGuiKey_GamepadLStickRight, pad.left_x);
+    stick(ImGuiKey_GamepadLStickUp, ImGuiKey_GamepadLStickDown, pad.left_y);
+    stick(ImGuiKey_GamepadRStickLeft, ImGuiKey_GamepadRStickRight, pad.right_x);
+    stick(ImGuiKey_GamepadRStickUp, ImGuiKey_GamepadRStickDown, pad.right_y);
+}
+
 static void UpdateGamepads() {
     ImGuiIO& io = ImGui::GetIO();
     SdlData* bd = GetBackendData();
+
+    if (Common::AndroidHost::InputSelected()) {
+        if (io.ConfigFlags & ImGuiConfigFlags_NavEnableGamepad) {
+            UpdateAndroidHostGamepad(io);
+        }
+        return;
+    }
 
     auto& controllers = *Common::Singleton<Input::GameControllers>::Instance();
     SDL_Gamepad* SDLGamepad = controllers[0]->m_sdl_gamepad;
