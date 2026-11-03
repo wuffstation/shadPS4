@@ -89,6 +89,63 @@ static Uint32 SDLCALL PollController(void* userdata, SDL_TimerID timer_id, Uint3
     return interval;
 }
 
+static Uint32 SDLCALL PollAndroidHostPad(void* userdata, SDL_TimerID timer_id, Uint32 interval) {
+    using Common::AndroidHost::PadWireButton;
+    static constexpr std::array<std::pair<PadWireButton, OrbisPadButtonDataOffset>, 16> Buttons{{
+        {PadWireButton::PadWireUp, OrbisPadButtonDataOffset::Up},
+        {PadWireButton::PadWireDown, OrbisPadButtonDataOffset::Down},
+        {PadWireButton::PadWireLeft, OrbisPadButtonDataOffset::Left},
+        {PadWireButton::PadWireRight, OrbisPadButtonDataOffset::Right},
+        {PadWireButton::PadWireCross, OrbisPadButtonDataOffset::Cross},
+        {PadWireButton::PadWireCircle, OrbisPadButtonDataOffset::Circle},
+        {PadWireButton::PadWireSquare, OrbisPadButtonDataOffset::Square},
+        {PadWireButton::PadWireTriangle, OrbisPadButtonDataOffset::Triangle},
+        {PadWireButton::PadWireL1, OrbisPadButtonDataOffset::L1},
+        {PadWireButton::PadWireR1, OrbisPadButtonDataOffset::R1},
+        {PadWireButton::PadWireL2, OrbisPadButtonDataOffset::L2},
+        {PadWireButton::PadWireR2, OrbisPadButtonDataOffset::R2},
+        {PadWireButton::PadWireL3, OrbisPadButtonDataOffset::L3},
+        {PadWireButton::PadWireR3, OrbisPadButtonDataOffset::R3},
+        {PadWireButton::PadWireOptions, OrbisPadButtonDataOffset::Options},
+        {PadWireButton::PadWireTouchPad, OrbisPadButtonDataOffset::TouchPad},
+    }};
+    static Common::AndroidHost::PadWireState last{.left_x = 128,
+                                                  .left_y = 128,
+                                                  .right_x = 128,
+                                                  .right_y = 128};
+
+    auto* controller = reinterpret_cast<Input::GameController*>(userdata);
+    Common::AndroidHost::PadWireState wire{};
+    const s64 result = Common::AndroidHost::PadRead(&wire);
+    if (result < 0) {
+        LOG_ERROR(Input, "The host refused a pad read ({}), no longer polling it", result);
+        return 0;
+    }
+    if (result == 0 || !wire.connected) {
+        wire = {.left_x = 128, .left_y = 128, .right_x = 128, .right_y = 128};
+    }
+    for (const auto& [bit, button] : Buttons) {
+        if ((wire.buttons ^ last.buttons) & bit) {
+            controller->Button(button, (wire.buttons & bit) != 0);
+        }
+    }
+    const std::array<std::pair<u8 Common::AndroidHost::PadWireState::*, Input::Axis>, 6> axes{{
+        {&Common::AndroidHost::PadWireState::left_x, Input::Axis::LeftX},
+        {&Common::AndroidHost::PadWireState::left_y, Input::Axis::LeftY},
+        {&Common::AndroidHost::PadWireState::right_x, Input::Axis::RightX},
+        {&Common::AndroidHost::PadWireState::right_y, Input::Axis::RightY},
+        {&Common::AndroidHost::PadWireState::left_trigger, Input::Axis::TriggerLeft},
+        {&Common::AndroidHost::PadWireState::right_trigger, Input::Axis::TriggerRight},
+    }};
+    for (const auto& [field, axis] : axes) {
+        if (wire.*field != last.*field) {
+            controller->Axis(axis, wire.*field, false);
+        }
+    }
+    last = wire;
+    return interval;
+}
+
 static Uint32 SDLCALL PollControllerLightColour(void* userdata, SDL_TimerID timer_id,
                                                 Uint32 interval) {
     auto* controller = reinterpret_cast<Input::GameController*>(userdata);
@@ -359,6 +416,9 @@ void WindowSDL::WaitEvent() {
 void WindowSDL::InitTimers() {
     for (int i = 0; i < 4; ++i) {
         SDL_AddTimer(4, &PollController, controllers[i]);
+    }
+    if (Common::AndroidHost::InputSelected()) {
+        SDL_AddTimer(4, &PollAndroidHostPad, controllers[0]);
     }
     SDL_AddTimer(33, Input::MousePolling, (void*)controllers[0]);
 }

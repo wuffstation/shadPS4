@@ -10,6 +10,7 @@
 
 #include <SDL3/SDL.h>
 
+#include "common/android_host.h"
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/time.h"
@@ -260,6 +261,10 @@ void GameControllers::ResetLightbarColors() {
 }
 
 bool GameController::SetVibration(u8 smallMotor, u8 largeMotor) {
+    if (Common::AndroidHost::InputSelected()) {
+        Common::AndroidHost::PadRumble(largeMotor, smallMotor);
+        return true;
+    }
     if (m_sdl_gamepad != nullptr) {
         return SDL_RumbleGamepad(m_sdl_gamepad, (smallMotor / 255.0f) * 0xFFFF,
                                  (largeMotor / 255.0f) * 0xFFFF, -1);
