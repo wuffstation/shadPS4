@@ -26,6 +26,7 @@ enum class WindowSystemType : u8 {
     X11,
     Wayland,
     Metal,
+    AndroidHost,
 };
 
 struct WindowSystemInfo {

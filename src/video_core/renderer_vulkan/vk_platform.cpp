@@ -63,6 +63,16 @@ vk::SurfaceKHR CreateSurface(vk::Instance instance, const Frontend::WindowSDL& e
     const auto& window_info = emu_window.GetWindowInfo();
     vk::SurfaceKHR surface{};
 
+    if (window_info.type == Frontend::WindowSystemType::AndroidHost) {
+        const vk::HeadlessSurfaceCreateInfoEXT headless_ci{};
+        if (instance.createHeadlessSurfaceEXT(&headless_ci, nullptr, &surface) !=
+            vk::Result::eSuccess) {
+            LOG_CRITICAL(Render_Vulkan, "Failed to initialize the host's headless surface");
+            UNREACHABLE();
+        }
+        return surface;
+    }
+
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
     if (window_info.type == Frontend::WindowSystemType::Windows) {
         const vk::Win32SurfaceCreateInfoKHR win32_ci = {
@@ -170,6 +180,9 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
 
     switch (window_type) {
     case Frontend::WindowSystemType::Headless:
+        break;
+    case Frontend::WindowSystemType::AndroidHost:
+        extensions.push_back(VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME);
         break;
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
     case Frontend::WindowSystemType::Windows:

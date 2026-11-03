@@ -10,6 +10,7 @@
 #include <cmrc/cmrc.hpp>
 #include <stb_image.h>
 
+#include "common/android_host.h"
 #include "common/assert.h"
 #include "common/elf_info.h"
 #include "common/io_file.h"
@@ -101,6 +102,13 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controller
     if (!SDL_SetHint(SDL_HINT_APP_NAME, "shadPS4")) {
         UNREACHABLE_MSG("Failed to set SDL window hint: {}", SDL_GetError());
     }
+    // SDL's Linux build has no video driver Android can open. Its dummy driver keeps a window for
+    // events and ImGui, and the surface is the host's (VK_EXT_headless_surface).
+    const bool android_host = Common::AndroidHost::WindowSelected();
+    if (android_host) {
+        SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
+        Common::AndroidHost::WindowSize(&width, &height);
+    }
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         UNREACHABLE_MSG("Failed to initialize SDL video subsystem: {}", SDL_GetError());
     }
@@ -120,17 +128,26 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controller
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_Y_NUMBER, SDL_WINDOWPOS_CENTERED);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height);
-    SDL_SetNumberProperty(props, "flags", SDL_WINDOW_VULKAN);
-    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
+    SDL_SetNumberProperty(props, "flags", android_host ? 0 : SDL_WINDOW_VULKAN);
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, !android_host);
     // Creating the window directly in fullscreen avoids a visible windowed -> fullscreen
     // transition on startup. SDL sizes the window to the display and keeps the requested
     // width/height as the windowed size to restore when leaving fullscreen.
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN,
-                           EmulatorSettings.IsFullScreen());
+                           !android_host && EmulatorSettings.IsFullScreen());
     window = SDL_CreateWindowWithProperties(props);
     SDL_DestroyProperties(props);
     if (window == nullptr) {
         UNREACHABLE_MSG("Failed to create window handle: {}", SDL_GetError());
+    }
+
+    if (android_host) {
+        SDL_InitSubSystem(SDL_INIT_GAMEPAD);
+        window_info.type = WindowSystemType::AndroidHost;
+        Input::ControllerOutput::LinkJoystickAxes();
+        Input::ParseInputConfig(std::string(Common::ElfInfo::Instance().GameSerial()));
+        LOG_INFO(Frontend, "Android host window (headless surface), {}x{}", width, height);
+        return;
     }
 
     SDL_SetWindowMinimumSize(window, 640, 360);

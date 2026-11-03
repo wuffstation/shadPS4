@@ -795,6 +795,8 @@ set(COMMON src/common/logging/classes.cpp
            src/common/logging/log_file_sink.h
            src/common/aes.h
            src/common/alignment.h
+           src/common/android_host.cpp
+           src/common/android_host.h
            src/common/arch.h
            src/common/assert.cpp
            src/common/assert.h
