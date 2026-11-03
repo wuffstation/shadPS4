@@ -36,4 +36,9 @@ public:
     std::unique_ptr<PortBackend> Open(PortOut& port) override;
 };
 
+class AAudioOut final : public AudioOutBackend {
+public:
+    std::unique_ptr<PortBackend> Open(PortOut& port) override;
+};
+
 } // namespace Libraries::AudioOut

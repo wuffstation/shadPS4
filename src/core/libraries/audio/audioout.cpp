@@ -9,6 +9,7 @@
 #include <fmt/format.h>
 #include <magic_enum/magic_enum.hpp>
 
+#include "common/android_host.h"
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/thread.h"
@@ -216,7 +217,9 @@ s32 PS4_SYSV_ABI sceAudioOutInit() {
         return ORBIS_AUDIO_OUT_ERROR_ALREADY_INIT;
     }
 
-    if (EmulatorSettings.GetAudioBackend() == AudioBackend::OpenAL) {
+    if (Common::AndroidHost::AudioSelected()) {
+        audio = std::make_unique<AAudioOut>();
+    } else if (EmulatorSettings.GetAudioBackend() == AudioBackend::OpenAL) {
         audio = std::make_unique<OpenALAudioOut>();
     } else {
         audio = std::make_unique<SDLAudioOut>();
