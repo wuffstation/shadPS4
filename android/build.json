@@ -3,5 +3,6 @@
     "name": "Android platform support",
     "notes": "shadPS4 expanded by Android platform support.",
     "hostSeams": ["window", "audio", "pad-1"],
+    "gameArchives": ["zar"],
     "env": {}
 }
